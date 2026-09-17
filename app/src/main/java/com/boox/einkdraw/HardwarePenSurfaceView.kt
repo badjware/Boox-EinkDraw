@@ -22,6 +22,8 @@ import com.onyx.android.sdk.pen.data.TouchPointList
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -170,6 +172,17 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
 
     // Reused paint for layer-alpha composition
     private val layerPaint = Paint().apply { isFilterBitmap = true }
+
+    // Pending e-ink refresh consumed at the end of the next onDraw.
+    // Refresh is decoupled from drawing so unrelated invalidations do not each flash the panel.
+    private var pendingRefresh = false
+    private var pendingRefreshMode = UpdateMode.HAND_WRITING_REPAINT_MODE
+    private val pendingRefreshRect = Rect()
+    private var pendingRefreshFullView = false
+
+    // Bounding box (view pixels) of the stroke just rendered, used for pen-up region refresh.
+    private val strokeRefreshRect = Rect()
+    private var hasStrokeRefreshRect = false
 
     // Public API
 
@@ -509,6 +522,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
         notifyViewportChanged()
         ensureTouchHelper()
         reconfigureTouchHelper()
+        invalidateSurface()
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -518,10 +532,32 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
         canvas.scale(viewScale, viewScale)
         drawLayers(canvas)
         canvas.restore()
+        flushPendingEinkRefresh()
+    }
+
+    /**
+     * Issue the e-ink refresh requested since the last draw, then clear the pending state.
+     * A region refresh touches only the given rect; a full-view refresh covers the surface.
+     */
+    private fun flushPendingEinkRefresh() {
+        if (!pendingRefresh) return
+        val mode = pendingRefreshMode
+        val fullView = pendingRefreshFullView
+        val l = pendingRefreshRect.left
+        val t = pendingRefreshRect.top
+        val r = pendingRefreshRect.right
+        val b = pendingRefreshRect.bottom
+        pendingRefresh = false
+        pendingRefreshFullView = false
+        pendingRefreshRect.setEmpty()
         runCatching {
-            EpdController.invalidate(this, UpdateMode.HAND_WRITING_REPAINT_MODE)
-            // Refresh only the drawing surface to avoid flashing unrelated UI (toolbar/panels).
-            EpdController.refreshScreen(this, UpdateMode.HAND_WRITING_REPAINT_MODE)
+            if (fullView || r <= l || b <= t) {
+                EpdController.invalidate(this, mode)
+                EpdController.refreshScreen(this, mode)
+            } else {
+                EpdController.invalidate(this, l, t, r, b, mode)
+                EpdController.refreshScreenRegion(this, l, t, r, b, mode)
+            }
         }
     }
 
@@ -749,8 +785,81 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
         layer.canvas.drawBitmap(layer.snapshotBitmap, 0f, 0f, null)
     }
 
+    /**
+     * Redraw the surface and refresh the whole view.
+     * Uses REGAL to keep the mono panel clean without a hard full-screen flash.
+     */
     private fun invalidateSurface() {
+        requestEinkRefresh(null, UpdateMode.REGAL)
         invalidate()
+    }
+
+    /**
+     * Store the just-rendered stroke bounds (converted to view pixels) for the pen-up refresh.
+     * Points are in layer-bitmap space; apply the current viewport transform and pad by the
+     * stroke half-width so anti-aliased edges are covered.
+     */
+    private fun setStrokeRefreshRect(points: List<TouchPoint>, strokeWidthBitmapPx: Float) {
+        if (points.isEmpty()) {
+            hasStrokeRefreshRect = false
+            return
+        }
+        var minX = Float.MAX_VALUE
+        var minY = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE
+        var maxY = -Float.MAX_VALUE
+        for (p in points) {
+            if (p.x < minX) minX = p.x
+            if (p.y < minY) minY = p.y
+            if (p.x > maxX) maxX = p.x
+            if (p.y > maxY) maxY = p.y
+        }
+        val pad = strokeWidthBitmapPx / 2f + 2f
+        val scale = viewScale
+        val left = (minX - pad) * scale + viewOffsetX
+        val top = (minY - pad) * scale + viewOffsetY
+        val right = (maxX + pad) * scale + viewOffsetX
+        val bottom = (maxY + pad) * scale + viewOffsetY
+        strokeRefreshRect.set(
+            floor(left).toInt().coerceAtLeast(0),
+            floor(top).toInt().coerceAtLeast(0),
+            ceil(right).toInt().coerceAtMost(width),
+            ceil(bottom).toInt().coerceAtMost(height),
+        )
+        hasStrokeRefreshRect = !strokeRefreshRect.isEmpty
+    }
+
+    /**
+     * Refresh the surface after a stroke: region-only when the stroke bounds are known,
+     * using the fast handwriting repaint mode so the pen-up does not flash the whole panel.
+     */
+    private fun refreshAfterStroke() {
+        if (hasStrokeRefreshRect) {
+            requestEinkRefresh(strokeRefreshRect, UpdateMode.HAND_WRITING_REPAINT_MODE)
+            hasStrokeRefreshRect = false
+        } else {
+            requestEinkRefresh(null, UpdateMode.HAND_WRITING_REPAINT_MODE)
+        }
+        invalidate()
+    }
+
+    /**
+     * Queue an e-ink refresh consumed by the next onDraw.
+     * A null rect requests a full-view refresh; otherwise the rect (view pixels) is unioned
+     * into the pending region so several requests before a draw collapse into one refresh.
+     */
+    private fun requestEinkRefresh(rect: Rect?, mode: UpdateMode) {
+        pendingRefresh = true
+        pendingRefreshMode = mode
+        if (rect == null) {
+            pendingRefreshFullView = true
+            return
+        }
+        if (pendingRefreshRect.isEmpty) {
+            pendingRefreshRect.set(rect)
+        } else {
+            pendingRefreshRect.union(rect)
+        }
     }
 
     private fun fitCenterRect(srcW: Int, srcH: Int, dstW: Int, dstH: Int): RectF {
@@ -1387,6 +1496,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
                     Log.e(TAG, "render threw: ${e.javaClass.simpleName}: ${e.message}", e)
                 }
                 updateSnapshot(strokeLayerId)
+                setStrokeRefreshRect(copy, strokeWidthPx)
             }
 
             strokePoints.clear()
@@ -1398,7 +1508,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
             postDelayed({
                 if (pendingPenUpRefresh) {
                     pendingPenUpRefresh = false
-                    invalidateSurface()
+                    refreshAfterStroke()
                 }
             }, 120L)
         }
@@ -1406,7 +1516,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
         override fun onPenUpRefresh(rectF: RectF?) {
             if (!pendingPenUpRefresh) return
             pendingPenUpRefresh = false
-            invalidateSurface()
+            refreshAfterStroke()
         }
 
         override fun onBeginRawErasing(success: Boolean, pt: TouchPoint?) {
