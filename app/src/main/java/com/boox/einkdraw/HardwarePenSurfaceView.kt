@@ -43,6 +43,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
 
     companion object {
         private const val TAG = "HardwarePenSurface"
+        private const val RECONFIGURE_DEBOUNCE_MS = 32L
         private const val HOVER_BUTTON_MASK = MotionEvent.BUTTON_PRIMARY or
             MotionEvent.BUTTON_SECONDARY or
             MotionEvent.BUTTON_TERTIARY or
@@ -587,6 +588,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
     }
 
     override fun onDetachedFromWindow() {
+        removeCallbacks(reconfigureRunnable)
         val helper = touchHelper
         touchHelper = null
         runOnHelperThread {
@@ -691,19 +693,35 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
 
     private fun ensureTouchHelper() {
         if (touchHelper != null) return
+        // FEATURE_SF_TOUCH_RENDER alone (empirically, confirmed on-device): no flicker/OS freeze
+        // and RawInputCallback still fires. FEATURE_ALL_TOUCH_RENDER captures all pointer types at
+        // the SurfaceFlinger level, which caused the flicker/lockups on touch-first panels.
         touchHelper = TouchHelper.create(
             this,
-            TouchHelper.FEATURE_ALL_TOUCH_RENDER,
+            TouchHelper.FEATURE_SF_TOUCH_RENDER,
             rawInputCallback,
             false
         )
     }
 
     /**
+     * Coalesce bursts of reconfigure requests (style+width+color set back-to-back at startup, or
+     * one call per pixel while dragging the width slider) into a single hardware chip reset.
+     * openRawDrawing() resets the pen chip; firing it many times in a fraction of a second caused
+     * app/OS hangs.
+     */
+    private fun reconfigureTouchHelper() {
+        removeCallbacks(reconfigureRunnable)
+        postDelayed(reconfigureRunnable, RECONFIGURE_DEBOUNCE_MS)
+    }
+
+    private val reconfigureRunnable = Runnable { performReconfigureTouchHelper() }
+
+    /**
      * Initialise / reconfigure the hardware chip.
      * The order here is critical.
      */
-    private fun reconfigureTouchHelper() {
+    private fun performReconfigureTouchHelper() {
         val helper = touchHelper ?: return
         val w = width
         val h = height

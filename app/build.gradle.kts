@@ -109,6 +109,10 @@ dependencies {
 }
 
 tasks.withType<JavaCompile>().configureEach {
+    // onyxsdk-base-1.8.4.aar already provides com.onyx.android.sdk.data.note.TouchPoint, so the
+    // local copy is excluded to avoid a duplicate-class conflict. It does NOT provide
+    // com.onyx.android.sdk.base.data.TouchPoint (the superclass the AAR's own TouchPoint extends,
+    // resolved by name from native-pen reflection), so that local copy must stay compiled in or
+    // any code path touching it throws ClassNotFoundException at runtime.
     exclude("**/com/onyx/android/sdk/data/note/TouchPoint.java")
-    exclude("**/com/onyx/android/sdk/base/data/TouchPoint.java")
 }
