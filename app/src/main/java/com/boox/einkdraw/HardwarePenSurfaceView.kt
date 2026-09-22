@@ -117,6 +117,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
     private var stylusTipEraserMode = false
     private var eraseModeListener: ((Boolean) -> Unit)? = null
     private var stylusHoverButtonListener: ((StylusHoverButtonState) -> Unit)? = null
+    private var strokeIntentListener: (() -> Unit)? = null
 
     // Viewport transform (software canvas only; hardware preview stays 1.0x)
     @Volatile
@@ -228,6 +229,11 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
 
     fun setOnStylusHoverButtonChangedListener(listener: ((StylusHoverButtonState) -> Unit)?) {
         stylusHoverButtonListener = listener
+    }
+
+    /** Fired on stylus touch-down, even while raw input is suppressed, so callers can un-pause. */
+    fun setOnStrokeIntentListener(listener: (() -> Unit)?) {
+        strokeIntentListener = listener
     }
 
     fun setManualEraserMode(enabled: Boolean) {
@@ -585,6 +591,9 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
         updateStylusTipEraserMode(event)
         logStylusMotionEvent(event, "touch")
         dispatchStylusHoverButtonState(event, "touch")
+        if (event.actionMasked == MotionEvent.ACTION_DOWN && isStylus(event)) {
+            strokeIntentListener?.invoke()
+        }
         if (rawInputSuppressed) return false
 
         // Finger-only stream is reserved for viewport gestures.

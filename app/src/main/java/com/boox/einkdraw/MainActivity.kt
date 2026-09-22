@@ -109,6 +109,11 @@ class MainActivity : AppCompatActivity() {
     private var pendingEraserExitCause: EraserExitCause = EraserExitCause.OTHER
     private var eraserUiTransitionInFlight: Boolean = false
     private var pendingEraserUiTransitionReset: Runnable? = null
+    private var historyUiTransitionInFlight: Boolean = false
+    private var pendingHistoryUiTransitionReset: Runnable? = null
+    private var lastCanUndo: Boolean? = null
+    private var lastCanRedo: Boolean? = null
+    private var historyButtonActionInFlight: Boolean = false
     private var pendingIncomingViewUri: Uri? = null
     private var pendingIncomingViewFlags: Int = 0
     private var pendingIncomingViewAttempts: Int = 0
@@ -272,10 +277,13 @@ class MainActivity : AppCompatActivity() {
         buttonLayers.setOnClickListener { toggleLayerPanel() }
         bindImmediateDownAction(buttonMenu) { toggleFileMenu() }
         buttonEraser.setOnClickListener { toggleManualEraserMode() }
-        buttonUndo.setOnClickListener { penView.undo() }
-        buttonRedo.setOnClickListener { penView.redo() }
+        buttonUndo.setOnClickListener { historyButtonActionInFlight = true; penView.undo() }
+        buttonRedo.setOnClickListener { historyButtonActionInFlight = true; penView.redo() }
         penView.setOnHistoryChangedListener {
             runOnUiThread { updateUndoRedoButtons() }
+        }
+        penView.setOnStrokeIntentListener {
+            runOnUiThread { cancelHistoryUiTransition() }
         }
         penView.setOnEraserModeChangedListener { active ->
             runOnUiThread { applyEraserModeUiTransition(active) }
@@ -516,10 +524,45 @@ class MainActivity : AppCompatActivity() {
     private fun updateUndoRedoButtons() {
         val canUndo = penView.canUndo()
         val canRedo = penView.canRedo()
+        // Only touch the toolbar when a button's enabled state actually flips; otherwise the
+        // refresh/pause runs on every stroke and just flickers the panel.
+        if (canUndo == lastCanUndo && canRedo == lastCanRedo) return
+        lastCanUndo = canUndo
+        lastCanRedo = canRedo
         buttonUndo.isEnabled = canUndo
         buttonUndo.alpha = if (canUndo) 1f else 0.3f
         buttonRedo.isEnabled = canRedo
         buttonRedo.alpha = if (canRedo) 1f else 0.3f
+        // Undo/redo button taps already repaint the canvas via applyPatch; refresh the toolbar
+        // once in the same cycle (no pause/delay) so it coalesces instead of flashing twice.
+        if (historyButtonActionInFlight) {
+            historyButtonActionInFlight = false
+            refreshToolbarEinkImmediately()
+            return
+        }
+        // Stroke end: raw drawing holds the e-ink panel and swallows toolbar refreshes, so pause it
+        // briefly (like the eraser transition) to let the button state repaint, then re-enable it.
+        historyUiTransitionInFlight = true
+        updateRawSuppression()
+        // Raw drawing is disabled asynchronously on the helper thread, so refresh once after a
+        // short delay to ensure it has landed; refreshing sooner gets swallowed.
+        rootFrame.postDelayed({ refreshToolbarEinkImmediately() }, 80L)
+        pendingHistoryUiTransitionReset?.let { rootFrame.removeCallbacks(it) }
+        val reset = Runnable {
+            historyUiTransitionInFlight = false
+            updateRawSuppression()
+        }
+        pendingHistoryUiTransitionReset = reset
+        rootFrame.postDelayed(reset, 250L)
+    }
+
+    /** End the history refresh pause early so a new stroke is not blocked by suppressed raw input. */
+    private fun cancelHistoryUiTransition() {
+        if (!historyUiTransitionInFlight) return
+        pendingHistoryUiTransitionReset?.let { rootFrame.removeCallbacks(it) }
+        pendingHistoryUiTransitionReset = null
+        historyUiTransitionInFlight = false
+        updateRawSuppression()
     }
 
     private fun refreshToolVisuals(eraseActive: Boolean) {
@@ -1118,6 +1161,7 @@ class MainActivity : AppCompatActivity() {
             pickerInFlight ||
             aboutDialogVisible ||
             eraserUiTransitionInFlight ||
+            historyUiTransitionInFlight ||
             uiTouchDepth > 0 ||
             layerPanel.visibility == View.VISIBLE ||
             colorPickerPanel.visibility == View.VISIBLE ||
