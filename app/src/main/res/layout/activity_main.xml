@@ -161,6 +161,26 @@
                     android:orientation="horizontal">
 
                     <ImageButton
+                        android:id="@+id/buttonUndo"
+                        android:layout_width="28dp"
+                        android:layout_height="28dp"
+                        android:layout_marginEnd="2dp"
+                        android:background="@android:color/transparent"
+                        android:contentDescription="Undo"
+                        android:padding="2dp"
+                        android:src="@drawable/ic_undo_black_24" />
+
+                    <ImageButton
+                        android:id="@+id/buttonRedo"
+                        android:layout_width="28dp"
+                        android:layout_height="28dp"
+                        android:layout_marginEnd="2dp"
+                        android:background="@android:color/transparent"
+                        android:contentDescription="Redo"
+                        android:padding="2dp"
+                        android:src="@drawable/ic_redo_black_24" />
+
+                    <ImageButton
                         android:id="@+id/buttonLayers"
                         android:layout_width="28dp"
                         android:layout_height="28dp"

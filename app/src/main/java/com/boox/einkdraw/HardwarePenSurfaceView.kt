@@ -1,11 +1,13 @@
 package com.boox.einkdraw
 
+import android.app.ActivityManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.graphics.RectF
 import android.util.AttributeSet
@@ -44,6 +46,13 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
     companion object {
         private const val TAG = "HardwarePenSurface"
         private const val RECONFIGURE_DEBOUNCE_MS = 32L
+
+        // Undo/redo history budget. Bitmaps live on the Java heap (Android 8+), so history
+        // competes with the ~36 MB-per-layer footprint and UI against the per-app heap cap
+        // (ActivityManager.memoryClass, often ~192 MB on mid-range). 48 MB leaves headroom;
+        // it is further clamped to a fraction of the measured cap at runtime.
+        private const val UNDO_BUDGET_BYTES = 48L * 1024 * 1024
+        private const val UNDO_HEAP_FRACTION = 0.4
         private const val HOVER_BUTTON_MASK = MotionEvent.BUTTON_PRIMARY or
             MotionEvent.BUTTON_SECONDARY or
             MotionEvent.BUTTON_TERTIARY or
@@ -185,6 +194,11 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
     private val strokeRefreshRect = Rect()
     private var hasStrokeRefreshRect = false
 
+    private val undoHistory = UndoHistory(resolveUndoBudgetBytes())
+    private var historyChangedListener: (() -> Unit)? = null
+    // Overwrites a region's pixels instead of blending, so restoring a patch replaces the area.
+    private val patchPaint = Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC) }
+
     // Public API
 
     fun setStyle(style: HardwarePenStyle) {
@@ -302,6 +316,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
 
         val removed = layers.removeAt(idx)
         recycleLayer(removed)
+        clearHistory()
 
         if (activeLayerId == id) {
             val nextIdx = idx.coerceAtMost(layers.lastIndex)
@@ -358,6 +373,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
         val layer = activeLayer() ?: return false
         clearBitmap(layer.canvas)
         clearBitmap(layer.snapshotCanvas)
+        clearHistory()
         if (strokeLayerId == layer.id) {
             strokePoints.clear()
             rawMovePoints.clear()
@@ -378,6 +394,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
         hasRenderedThisStroke = false
         strokeInProgress = false
         strokeLayerId = -1
+        clearHistory()
 
         layers.forEach { recycleLayer(it) }
         layers.clear()
@@ -414,6 +431,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
         if (bitmap.isRecycled || width <= 0 || height <= 0) return false
         ensureLayerStack(width, height)
         val layer = activeLayer() ?: return false
+        clearHistory()
 
         clearBitmap(layer.canvas)
         val dst = fitCenterRect(bitmap.width, bitmap.height, width, height)
@@ -468,6 +486,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
         hasRenderedThisStroke = false
         strokeInProgress = false
         strokeLayerId = -1
+        clearHistory()
 
         layers.forEach { recycleLayer(it) }
         layers.clear()
@@ -599,6 +618,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
         }
         helperThread.shutdown()
 
+        undoHistory.clear()
         layers.forEach { recycleLayer(it) }
         layers.clear()
 
@@ -631,6 +651,8 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
         }
 
         // Size changed: recreate while preserving existing pixels.
+        // History rects are keyed to the old bitmap size, so discard them.
+        clearHistory()
         val oldLayers = ArrayList(layers)
         layers.clear()
         for (old in oldLayers) {
@@ -801,6 +823,173 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
         val layer = layerById(layerId) ?: return
         clearBitmap(layer.canvas)
         layer.canvas.drawBitmap(layer.snapshotBitmap, 0f, 0f, null)
+    }
+
+    // Undo/redo
+
+    private fun clearHistory() {
+        undoHistory.clear()
+        historyChangedListener?.invoke()
+    }
+
+    fun canUndo(): Boolean = undoHistory.canUndo()
+
+    fun canRedo(): Boolean = undoHistory.canRedo()
+
+    fun setOnHistoryChangedListener(listener: (() -> Unit)?) {
+        historyChangedListener = listener
+        listener?.invoke()
+    }
+
+    fun undo(): Boolean {
+        val entry = undoHistory.undo() ?: return false
+        applyPatch(entry.layerId, entry.before, entry.rect)
+        historyChangedListener?.invoke()
+        return true
+    }
+
+    fun redo(): Boolean {
+        val entry = undoHistory.redo() ?: return false
+        applyPatch(entry.layerId, entry.after, entry.rect)
+        historyChangedListener?.invoke()
+        return true
+    }
+
+    /**
+     * Capture the pixels of the stroke's bounding box before and after rendering, so the stroke
+     * can be undone/redone by restoring the region. Must run after render but before
+     * updateSnapshot (the layer snapshot still holds the pre-stroke pixels here).
+     */
+    private fun recordStrokeHistory(layer: LayerState, points: List<TouchPoint>, strokeWidthBitmapPx: Float) {
+        val rect = strokeBoundsInBitmap(points, strokeWidthBitmapPx, layer.bitmap.width, layer.bitmap.height)
+            ?: return
+        val before = Bitmap.createBitmap(layer.snapshotBitmap, rect.left, rect.top, rect.width(), rect.height())
+        val after = Bitmap.createBitmap(layer.bitmap, rect.left, rect.top, rect.width(), rect.height())
+        undoHistory.record(HistoryEntry(layer.id, Rect(rect), before, after))
+        historyChangedListener?.invoke()
+    }
+
+    /** Bounding box of a stroke in bitmap pixels, padded for the stroke width and clamped. */
+    private fun strokeBoundsInBitmap(
+        points: List<TouchPoint>,
+        strokeWidthBitmapPx: Float,
+        bmpW: Int,
+        bmpH: Int,
+    ): Rect? {
+        if (points.isEmpty()) return null
+        var minX = Float.MAX_VALUE
+        var minY = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE
+        var maxY = -Float.MAX_VALUE
+        for (p in points) {
+            if (p.x < minX) minX = p.x
+            if (p.y < minY) minY = p.y
+            if (p.x > maxX) maxX = p.x
+            if (p.y > maxY) maxY = p.y
+        }
+        val pad = strokeWidthBitmapPx / 2f + 2f
+        val left = floor(minX - pad).toInt().coerceIn(0, bmpW)
+        val top = floor(minY - pad).toInt().coerceIn(0, bmpH)
+        val right = ceil(maxX + pad).toInt().coerceIn(0, bmpW)
+        val bottom = ceil(maxY + pad).toInt().coerceIn(0, bmpH)
+        if (right <= left || bottom <= top) return null
+        return Rect(left, top, right, bottom)
+    }
+
+    /** Restore a saved region into a layer, refreshing only that area. */
+    private fun applyPatch(layerId: Int, patch: Bitmap, rect: Rect) {
+        val layer = layerById(layerId) ?: return
+        layer.canvas.drawBitmap(patch, rect.left.toFloat(), rect.top.toFloat(), patchPaint)
+        updateSnapshot(layerId)
+        val viewRect = Rect(
+            floor(rect.left * viewScale + viewOffsetX).toInt().coerceAtLeast(0),
+            floor(rect.top * viewScale + viewOffsetY).toInt().coerceAtLeast(0),
+            ceil(rect.right * viewScale + viewOffsetX).toInt().coerceAtMost(width),
+            ceil(rect.bottom * viewScale + viewOffsetY).toInt().coerceAtMost(height),
+        )
+        requestEinkRefresh(if (viewRect.isEmpty) null else viewRect, UpdateMode.HAND_WRITING_REPAINT_MODE)
+        invalidate()
+    }
+
+    /** Clamp the history budget to a fraction of the app's actual heap cap. */
+    private fun resolveUndoBudgetBytes(): Long {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val capMb = am?.largeMemoryClass ?: 128
+        val fraction = (capMb.toLong() * 1024 * 1024 * UNDO_HEAP_FRACTION).toLong()
+        return minOf(UNDO_BUDGET_BYTES, fraction).coerceAtLeast(4L * 1024 * 1024)
+    }
+
+    private class HistoryEntry(
+        val layerId: Int,
+        val rect: Rect,
+        val before: Bitmap,
+        val after: Bitmap,
+    ) {
+        val bytes: Long = before.byteCount.toLong() + after.byteCount.toLong()
+
+        fun recycle() {
+            if (!before.isRecycled) before.recycle()
+            if (!after.isRecycled) after.recycle()
+        }
+    }
+
+    /**
+     * Pixel-region undo/redo with a total-bytes budget. Undo moves the top entry to the redo
+     * stack; a new record clears the redo stack. Eviction drops the oldest undo entries when the
+     * budget is exceeded, recycling their bitmaps.
+     */
+    private class UndoHistory(private val budgetBytes: Long) {
+        private val undoStack = ArrayDeque<HistoryEntry>()
+        private val redoStack = ArrayDeque<HistoryEntry>()
+        private var bytes = 0L
+
+        fun canUndo(): Boolean = undoStack.isNotEmpty()
+
+        fun canRedo(): Boolean = redoStack.isNotEmpty()
+
+        fun record(entry: HistoryEntry) {
+            clearRedo()
+            undoStack.addLast(entry)
+            bytes += entry.bytes
+            evict()
+        }
+
+        fun undo(): HistoryEntry? {
+            val entry = undoStack.removeLastOrNull() ?: return null
+            redoStack.addLast(entry)
+            return entry
+        }
+
+        fun redo(): HistoryEntry? {
+            val entry = redoStack.removeLastOrNull() ?: return null
+            undoStack.addLast(entry)
+            return entry
+        }
+
+        fun clear() {
+            undoStack.forEach { it.recycle() }
+            redoStack.forEach { it.recycle() }
+            undoStack.clear()
+            redoStack.clear()
+            bytes = 0L
+        }
+
+        private fun clearRedo() {
+            if (redoStack.isEmpty()) return
+            redoStack.forEach {
+                bytes -= it.bytes
+                it.recycle()
+            }
+            redoStack.clear()
+        }
+
+        private fun evict() {
+            while (bytes > budgetBytes && undoStack.size > 1) {
+                val evicted = undoStack.removeFirst()
+                bytes -= evicted.bytes
+                evicted.recycle()
+            }
+        }
     }
 
     /**
@@ -1513,6 +1702,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
                 }.onFailure { e ->
                     Log.e(TAG, "render threw: ${e.javaClass.simpleName}: ${e.message}", e)
                 }
+                recordStrokeHistory(layer, copy, strokeWidthPx)
                 updateSnapshot(strokeLayerId)
                 setStrokeRefreshRect(copy, strokeWidthPx)
             }

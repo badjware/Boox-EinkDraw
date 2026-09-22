@@ -82,6 +82,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var buttonLayers: ImageButton
     private lateinit var buttonMenu: ImageButton
     private lateinit var buttonEraser: ImageButton
+    private lateinit var buttonUndo: ImageButton
+    private lateinit var buttonRedo: ImageButton
     private lateinit var buttonAddLayer: ImageButton
     private lateinit var buttonRemoveLayer: ImageButton
     private lateinit var layerAdapter: LayerListAdapter
@@ -170,6 +172,8 @@ class MainActivity : AppCompatActivity() {
         buttonLayers = findViewById(R.id.buttonLayers)
         buttonMenu = findViewById(R.id.buttonMenu)
         buttonEraser = findViewById(R.id.buttonEraser)
+        buttonUndo = findViewById(R.id.buttonUndo)
+        buttonRedo = findViewById(R.id.buttonRedo)
         buttonAddLayer = findViewById(R.id.buttonAddLayer)
         buttonRemoveLayer = findViewById(R.id.buttonRemoveLayer)
 
@@ -208,6 +212,8 @@ class MainActivity : AppCompatActivity() {
         guardRawMode(swatchBlue)
         guardRawMode(buttonLayers)
         guardRawMode(buttonEraser)
+        guardRawMode(buttonUndo)
+        guardRawMode(buttonRedo)
         guardRawMode(buttonAddLayer)
         guardRawMode(buttonRemoveLayer)
         guardRawMode(layerRecycler)
@@ -266,6 +272,11 @@ class MainActivity : AppCompatActivity() {
         buttonLayers.setOnClickListener { toggleLayerPanel() }
         bindImmediateDownAction(buttonMenu) { toggleFileMenu() }
         buttonEraser.setOnClickListener { toggleManualEraserMode() }
+        buttonUndo.setOnClickListener { penView.undo() }
+        buttonRedo.setOnClickListener { penView.redo() }
+        penView.setOnHistoryChangedListener {
+            runOnUiThread { updateUndoRedoButtons() }
+        }
         penView.setOnEraserModeChangedListener { active ->
             runOnUiThread { applyEraserModeUiTransition(active) }
         }
@@ -500,6 +511,15 @@ class MainActivity : AppCompatActivity() {
         pendingEraserExitCause = EraserExitCause.OTHER
         manualEraserMode = false
         penView.setManualEraserMode(false)
+    }
+
+    private fun updateUndoRedoButtons() {
+        val canUndo = penView.canUndo()
+        val canRedo = penView.canRedo()
+        buttonUndo.isEnabled = canUndo
+        buttonUndo.alpha = if (canUndo) 1f else 0.3f
+        buttonRedo.isEnabled = canRedo
+        buttonRedo.alpha = if (canRedo) 1f else 0.3f
     }
 
     private fun refreshToolVisuals(eraseActive: Boolean) {
