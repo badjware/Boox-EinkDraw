@@ -111,8 +111,8 @@ class MainActivity : AppCompatActivity() {
     private var pendingEraserUiTransitionReset: Runnable? = null
     private var historyUiTransitionInFlight: Boolean = false
     private var pendingHistoryUiTransitionReset: Runnable? = null
-    private var lastCanUndo: Boolean? = null
-    private var lastCanRedo: Boolean? = null
+    private var lastCanUndo: Boolean = false
+    private var lastCanRedo: Boolean = false
     private var historyButtonActionInFlight: Boolean = false
     private var pendingIncomingViewUri: Uri? = null
     private var pendingIncomingViewFlags: Int = 0
@@ -279,6 +279,12 @@ class MainActivity : AppCompatActivity() {
         buttonEraser.setOnClickListener { toggleManualEraserMode() }
         buttonUndo.setOnClickListener { historyButtonActionInFlight = true; penView.undo() }
         buttonRedo.setOnClickListener { historyButtonActionInFlight = true; penView.redo() }
+        // History starts empty; set the disabled visuals up front so the initial listener invoke is
+        // a no-op and does not run a spurious toolbar refresh at launch.
+        buttonUndo.isEnabled = false
+        buttonUndo.alpha = 0.3f
+        buttonRedo.isEnabled = false
+        buttonRedo.alpha = 0.3f
         penView.setOnHistoryChangedListener {
             runOnUiThread { updateUndoRedoButtons() }
         }
