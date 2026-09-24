@@ -62,6 +62,7 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_LAST_OPEN_URI = "last_open_uri"
         private const val KEY_BRUSH_STYLE = "brush_style"
         private const val KEY_BRUSH_WIDTHS = "brush_widths"
+        private const val KEY_ERASER_WIDTH = "eraser_width"
         private const val KEY_INK_COLOR = "ink_color"
         private const val KEY_PICKER_COLOR = "picker_color"
         private const val AUTOSAVE_FILE_NAME = "autosave.json"
@@ -95,6 +96,7 @@ class MainActivity : AppCompatActivity() {
 
     private val brushButtons = LinkedHashMap<HardwarePenStyle, ImageButton>(HardwarePenStyle.entries.size)
     private val brushWidths = HardwarePenStyle.entries.associateWith { it.defaultWidthPx }.toMutableMap()
+    private var eraserWidthPx: Float = 30f
     private var selectedBrushStyle: HardwarePenStyle = HardwarePenStyle.PENCIL
     private var selectedBrushBtn: ImageButton? = null
     private var selectedColorSwatch: View? = null
@@ -530,6 +532,12 @@ class MainActivity : AppCompatActivity() {
         refreshToolVisuals(penView.isEraseModeActive())
     }
 
+    private fun applyEraserWidth() {
+        penView.setStrokeWidthPx(eraserWidthPx)
+        widthSeekBar.progress = widthToProgress(eraserWidthPx)
+        widthValueLabel.text = "${eraserWidthPx.roundToInt()} px"
+    }
+
     private fun toggleManualEraserMode() {
         if (!manualEraserMode) {
             manualEraserMode = true
@@ -613,7 +621,11 @@ class MainActivity : AppCompatActivity() {
                 if (!fromUser) return
                 val width = progressToWidth(progress)
                 widthValueLabel.text = "${width.roundToInt()} px"
-                brushWidths[selectedBrushStyle] = width
+                if (penView.isEraseModeActive()) {
+                    eraserWidthPx = width
+                } else {
+                    brushWidths[selectedBrushStyle] = width
+                }
                 penView.setStrokeWidthPx(width)
             }
 
@@ -679,6 +691,7 @@ class MainActivity : AppCompatActivity() {
             lastColorBeforeEraser = currentInkColor
             pendingEraserExitCause = EraserExitCause.OTHER
             eraserWasActive = true
+            applyEraserWidth()
             return
         }
 
@@ -1143,6 +1156,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+        eraserWidthPx = p.getFloat(KEY_ERASER_WIDTH, 30f)
         currentInkColor = p.getInt(KEY_INK_COLOR, Color.BLACK)
         pickerDotColor = p.getInt(KEY_PICKER_COLOR, Color.BLUE)
     }
@@ -1154,6 +1168,7 @@ class MainActivity : AppCompatActivity() {
         prefs().edit()
             .putString(KEY_BRUSH_STYLE, selectedBrushStyle.name)
             .putString(KEY_BRUSH_WIDTHS, widths.toString())
+            .putFloat(KEY_ERASER_WIDTH, eraserWidthPx)
             .putInt(KEY_INK_COLOR, currentInkColor)
             .putInt(KEY_PICKER_COLOR, pickerDotColor)
             .apply()
