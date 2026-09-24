@@ -869,40 +869,64 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
      * can be undone/redone by restoring the region. Must run after render but before
      * updateSnapshot (the layer snapshot still holds the pre-stroke pixels here).
      */
-    private fun recordStrokeHistory(layer: LayerState, points: List<TouchPoint>, strokeWidthBitmapPx: Float) {
-        val rect = strokeBoundsInBitmap(points, strokeWidthBitmapPx, layer.bitmap.width, layer.bitmap.height)
-            ?: return
+    private fun recordStrokeHistory(layer: LayerState, points: List<TouchPoint>, strokeWidthBitmapPx: Float, style: HardwarePenStyle) {
+        val rect = changedBounds(layer.snapshotBitmap, layer.bitmap) ?: return
         val before = Bitmap.createBitmap(layer.snapshotBitmap, rect.left, rect.top, rect.width(), rect.height())
         val after = Bitmap.createBitmap(layer.bitmap, rect.left, rect.top, rect.width(), rect.height())
         undoHistory.record(HistoryEntry(layer.id, Rect(rect), before, after))
         historyChangedListener?.invoke()
     }
 
-    /** Bounding box of a stroke in bitmap pixels, padded for the stroke width and clamped. */
-    private fun strokeBoundsInBitmap(
-        points: List<TouchPoint>,
-        strokeWidthBitmapPx: Float,
-        bmpW: Int,
-        bmpH: Int,
-    ): Rect? {
-        if (points.isEmpty()) return null
-        var minX = Float.MAX_VALUE
-        var minY = Float.MAX_VALUE
-        var maxX = -Float.MAX_VALUE
-        var maxY = -Float.MAX_VALUE
-        for (p in points) {
-            if (p.x < minX) minX = p.x
-            if (p.y < minY) minY = p.y
-            if (p.x > maxX) maxX = p.x
-            if (p.y > maxY) maxY = p.y
+    /**
+     * Tight bounding box of pixels that differ between two same-sized bitmaps, or null if none
+     * differ. Renderer-agnostic: it captures the true painted region no matter how a textured pen
+     * (charcoal) spreads stamps beyond the raw-point envelope, so undo leaves no stray pixels.
+     * Scans row by row with a reused buffer to avoid allocating a full-bitmap int array.
+     */
+    private fun changedBounds(before: Bitmap, after: Bitmap): Rect? {
+        val w = before.width
+        val h = before.height
+        if (w != after.width || h != after.height || w == 0 || h == 0) return null
+        val rowBefore = IntArray(w)
+        val rowAfter = IntArray(w)
+        var minX = w
+        var minY = h
+        var maxX = -1
+        var maxY = -1
+        for (y in 0 until h) {
+            before.getPixels(rowBefore, 0, w, 0, y, w, 1)
+            after.getPixels(rowAfter, 0, w, 0, y, w, 1)
+            var rowMinX = -1
+            var rowMaxX = -1
+            for (x in 0 until w) {
+                if (rowBefore[x] != rowAfter[x]) {
+                    if (rowMinX < 0) rowMinX = x
+                    rowMaxX = x
+                }
+            }
+            if (rowMinX >= 0) {
+                if (rowMinX < minX) minX = rowMinX
+                if (rowMaxX > maxX) maxX = rowMaxX
+                if (y < minY) minY = y
+                maxY = y
+            }
         }
-        val pad = strokeWidthBitmapPx / 2f + 2f
-        val left = floor(minX - pad).toInt().coerceIn(0, bmpW)
-        val top = floor(minY - pad).toInt().coerceIn(0, bmpH)
-        val right = ceil(maxX + pad).toInt().coerceIn(0, bmpW)
-        val bottom = ceil(maxY + pad).toInt().coerceIn(0, bmpH)
-        if (right <= left || bottom <= top) return null
-        return Rect(left, top, right, bottom)
+        if (maxX < 0) return null
+        return Rect(minX, minY, maxX + 1, maxY + 1)
+    }
+
+    /**
+     * Extra padding (bitmap px) around a stroke's raw-point envelope, per style. Textured and
+     * pressure-driven pens paint fringe pixels beyond a plain round-cap polyline, so their
+     * captured region must be wider or undo leaves stray pixels at the stroke edge.
+     */
+    private fun strokeBoundsPadding(style: HardwarePenStyle, strokeWidthBitmapPx: Float): Float {
+        val half = strokeWidthBitmapPx / 2f
+        return when (style) {
+            HardwarePenStyle.CHARCOAL, HardwarePenStyle.CHARCOAL_V2 -> half * 2f + 8f
+            HardwarePenStyle.FOUNTAIN, HardwarePenStyle.NEO_BRUSH, HardwarePenStyle.MARKER -> half * 1.5f + 4f
+            HardwarePenStyle.PENCIL, HardwarePenStyle.DASH, HardwarePenStyle.SQUARE_PEN -> half + 2f
+        }
     }
 
     /** Restore a saved region into a layer, refreshing only that area. */
@@ -1015,7 +1039,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
      * Points are in layer-bitmap space; apply the current viewport transform and pad by the
      * stroke half-width so anti-aliased edges are covered.
      */
-    private fun setStrokeRefreshRect(points: List<TouchPoint>, strokeWidthBitmapPx: Float) {
+    private fun setStrokeRefreshRect(points: List<TouchPoint>, strokeWidthBitmapPx: Float, style: HardwarePenStyle) {
         if (points.isEmpty()) {
             hasStrokeRefreshRect = false
             return
@@ -1030,7 +1054,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
             if (p.x > maxX) maxX = p.x
             if (p.y > maxY) maxY = p.y
         }
-        val pad = strokeWidthBitmapPx / 2f + 2f
+        val pad = strokeBoundsPadding(style, strokeWidthBitmapPx)
         val scale = viewScale
         val left = (minX - pad) * scale + viewOffsetX
         val top = (minY - pad) * scale + viewOffsetY
@@ -1711,9 +1735,9 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
                 }.onFailure { e ->
                     Log.e(TAG, "render threw: ${e.javaClass.simpleName}: ${e.message}", e)
                 }
-                recordStrokeHistory(layer, copy, strokeWidthPx)
+                recordStrokeHistory(layer, copy, strokeWidthPx, strokeStyle)
                 updateSnapshot(strokeLayerId)
-                setStrokeRefreshRect(copy, strokeWidthPx)
+                setStrokeRefreshRect(copy, strokeWidthPx, strokeStyle)
             }
 
             strokePoints.clear()
