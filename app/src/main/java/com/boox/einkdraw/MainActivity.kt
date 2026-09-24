@@ -60,6 +60,11 @@ class MainActivity : AppCompatActivity() {
         private const val TAG = "MainActivity"
         private const val PREFS_NAME = "boox_einkdraw_prefs"
         private const val KEY_LAST_OPEN_URI = "last_open_uri"
+        private const val KEY_BRUSH_STYLE = "brush_style"
+        private const val KEY_BRUSH_WIDTHS = "brush_widths"
+        private const val KEY_INK_COLOR = "ink_color"
+        private const val KEY_PICKER_COLOR = "picker_color"
+        private const val AUTOSAVE_FILE_NAME = "autosave.json"
     }
 
     private lateinit var penView: HardwarePenSurfaceView
@@ -194,6 +199,7 @@ class MainActivity : AppCompatActivity() {
         val resetViewBtn = findViewById<View>(R.id.buttonResetView)
         val aboutBtn = findViewById<View>(R.id.buttonAbout)
 
+        loadToolbarPrefs()
         setupBrushButtons()
         setupWidthSeekBar()
         setupColorPickerPanel()
@@ -305,12 +311,13 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        selectBrush(HardwarePenStyle.PENCIL)
+        selectBrush(selectedBrushStyle)
         refreshLayerPanel()
         ensureOverlayOrder()
         updateRawSuppression()
         updateZoomLabel(penView.getViewScale())
         handleIncomingViewIntent(intent)
+        restoreAutosaveWhenReady()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -628,7 +635,12 @@ class MainActivity : AppCompatActivity() {
         bindColorSwatch(swatchWhite, Color.WHITE)
         swatchBlue.setOnClickListener { toggleColorPickerPanel() }
         refreshPickerToggleSwatch(active = false)
-        applyColor(currentInkColor, swatch = swatchBlack, syncPicker = false)
+        val initialSwatch = when (currentInkColor) {
+            Color.BLACK -> swatchBlack
+            Color.WHITE -> swatchWhite
+            else -> null
+        }
+        applyColor(currentInkColor, swatch = initialSwatch, syncPicker = false)
     }
 
     private fun bindColorSwatch(swatch: View, color: Int) {
@@ -962,6 +974,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadDpaintDocument(uri: Uri): Boolean {
         val text = readUriText(uri) ?: return false
+        return loadDpaintFromText(text)
+    }
+
+    private fun loadDpaintFromText(text: String): Boolean {
         val root = runCatching { JSONObject(text) }.getOrNull() ?: return false
         if (!root.optString("type").equals("dpaint", ignoreCase = true)) return false
 
@@ -1112,6 +1128,64 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun prefs() = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+
+    /** Restore brush style, per-brush widths, ink color and picker color into the in-memory fields. */
+    private fun loadToolbarPrefs() {
+        val p = prefs()
+        val styleName = p.getString(KEY_BRUSH_STYLE, null)
+        selectedBrushStyle = HardwarePenStyle.entries.firstOrNull { it.name == styleName }
+            ?: HardwarePenStyle.PENCIL
+        runCatching {
+            val widths = JSONObject(p.getString(KEY_BRUSH_WIDTHS, "{}") ?: "{}")
+            HardwarePenStyle.entries.forEach { style ->
+                if (widths.has(style.name)) {
+                    brushWidths[style] = widths.getDouble(style.name).toFloat()
+                }
+            }
+        }
+        currentInkColor = p.getInt(KEY_INK_COLOR, Color.BLACK)
+        pickerDotColor = p.getInt(KEY_PICKER_COLOR, Color.BLUE)
+    }
+
+    /** Persist the current toolbar settings. Called from onPause. */
+    private fun saveToolbarPrefs() {
+        val widths = JSONObject()
+        brushWidths.forEach { (style, width) -> widths.put(style.name, width.toDouble()) }
+        prefs().edit()
+            .putString(KEY_BRUSH_STYLE, selectedBrushStyle.name)
+            .putString(KEY_BRUSH_WIDTHS, widths.toString())
+            .putInt(KEY_INK_COLOR, currentInkColor)
+            .putInt(KEY_PICKER_COLOR, pickerDotColor)
+            .apply()
+    }
+
+    private fun autosaveFile(): File = File(filesDir, AUTOSAVE_FILE_NAME)
+
+    /** Serialize the current document to internal storage. Called from onPause. */
+    private fun saveAutosaveCanvas() {
+        val snapshot = penView.snapshotDocumentForExport() ?: return
+        runCatching {
+            val json = buildDpaintJson(snapshot, currentDocumentBaseName)
+            autosaveFile().writeText(json.toString(), Charsets.UTF_8)
+        }
+        snapshot.layers.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
+    }
+
+    /**
+     * Restore the autosaved document once the pen surface has a valid size. Skipped when an
+     * incoming VIEW intent is pending so it does not clobber a file the user asked to open.
+     */
+    private fun restoreAutosaveWhenReady() {
+        if (pendingIncomingViewUri != null) return
+        val file = autosaveFile()
+        if (!file.exists()) return
+        if (penView.width <= 0 || penView.height <= 0) {
+            penView.postDelayed({ restoreAutosaveWhenReady() }, 32L)
+            return
+        }
+        val text = runCatching { file.readText(Charsets.UTF_8) }.getOrNull() ?: return
+        loadDpaintFromText(text)
+    }
 
     private fun rememberLastOpenUri(uri: Uri) {
         prefs().edit().putString(KEY_LAST_OPEN_URI, uri.toString()).apply()
@@ -1353,6 +1427,8 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         activityPaused = true
+        saveToolbarPrefs()
+        saveAutosaveCanvas()
         updateRawSuppression()
     }
 
