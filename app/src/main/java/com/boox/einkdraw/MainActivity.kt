@@ -463,7 +463,9 @@ class MainActivity : AppCompatActivity() {
         layerPanel.visibility = if (willShow) View.VISIBLE else View.GONE
         if (willShow) refreshLayerPanel()
         ensureOverlayOrder()
+        if (!willShow) overlayDismissInFlight = true
         updateRawSuppression()
+        if (!willShow) refreshUiAfterOverlayDismiss()
     }
 
     private fun toggleColorPickerPanel() {
@@ -476,14 +478,18 @@ class MainActivity : AppCompatActivity() {
         colorPickerPanel.visibility = if (willShow) View.VISIBLE else View.GONE
         refreshPickerToggleSwatch(active = willShow)
         ensureOverlayOrder()
+        if (!willShow) overlayDismissInFlight = true
         updateRawSuppression()
+        if (!willShow) refreshUiAfterOverlayDismiss()
     }
 
     private fun toggleFileMenu() {
         val willShow = fileMenuPanel.visibility != View.VISIBLE
         fileMenuPanel.visibility = if (willShow) View.VISIBLE else View.GONE
         ensureOverlayOrder()
+        if (!willShow) overlayDismissInFlight = true
         updateRawSuppression()
+        if (!willShow) refreshUiAfterOverlayDismiss()
     }
 
     private fun ensureOverlayOrder() {
