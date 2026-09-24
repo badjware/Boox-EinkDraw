@@ -114,6 +114,9 @@ class MainActivity : AppCompatActivity() {
     private var lastCanUndo: Boolean = false
     private var lastCanRedo: Boolean = false
     private var historyButtonActionInFlight: Boolean = false
+    private var overlayDismissInFlight: Boolean = false
+    private var pendingOverlayDismissReset: Runnable? = null
+    private var consumingDismissGesture: Boolean = false
     private var pendingIncomingViewUri: Uri? = null
     private var pendingIncomingViewFlags: Int = 0
     private var pendingIncomingViewAttempts: Int = 0
@@ -1168,6 +1171,7 @@ class MainActivity : AppCompatActivity() {
             aboutDialogVisible ||
             eraserUiTransitionInFlight ||
             historyUiTransitionInFlight ||
+            overlayDismissInFlight ||
             uiTouchDepth > 0 ||
             layerPanel.visibility == View.VISIBLE ||
             colorPickerPanel.visibility == View.VISIBLE ||
@@ -1229,11 +1233,21 @@ class MainActivity : AppCompatActivity() {
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
         when (ev.actionMasked) {
-            MotionEvent.ACTION_DOWN,
-            MotionEvent.ACTION_POINTER_DOWN,
-            MotionEvent.ACTION_UP,
-            MotionEvent.ACTION_POINTER_UP -> {
-                if (dismissPanelsIfTappedOutside(ev.rawX, ev.rawY)) return true
+            MotionEvent.ACTION_DOWN -> {
+                if (dismissPanelsIfTappedOutside(ev.rawX, ev.rawY)) {
+                    // Swallow the whole gesture so the tap-to-close does not draw a stroke.
+                    consumingDismissGesture = true
+                    return true
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (consumingDismissGesture) {
+                    consumingDismissGesture = false
+                    return true
+                }
+            }
+            else -> {
+                if (consumingDismissGesture) return true
             }
         }
         return super.dispatchTouchEvent(ev)
@@ -1290,6 +1304,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (dismissed) {
+            // Set the dismiss flag before updating suppression so raw drawing is never re-enabled
+            // mid-gesture; otherwise the still-down pen starts a stroke via the Onyx path.
+            overlayDismissInFlight = true
             refreshPickerToggleSwatch(active = colorPickerPanel.visibility == View.VISIBLE)
             updateRawSuppression()
             refreshUiAfterOverlayDismiss()
@@ -1298,10 +1315,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshUiAfterOverlayDismiss() {
-        rootFrame.post {
-            rootFrame.invalidate()
-            penView.invalidate()
+        rootFrame.invalidate()
+        penView.invalidate()
+        // Raw drawing stays suppressed via overlayDismissInFlight (set by the caller) and the view
+        // redraw pass has not run yet. Wait for the redraw, force a full e-ink refresh to clear the
+        // pixels where the panel was, then re-enable raw drawing.
+        val decor = window?.decorView ?: rootFrame
+        rootFrame.postDelayed({
+            runCatching {
+                // GC does a full refresh with a flash to clear ghosting from where the panel was;
+                // GU leaves residual ghosting on large filled areas like a dismissed panel.
+                EpdController.invalidate(decor, UpdateMode.GC)
+                EpdController.refreshScreen(decor, UpdateMode.GC)
+            }
+        }, 80L)
+        pendingOverlayDismissReset?.let { rootFrame.removeCallbacks(it) }
+        val reset = Runnable {
+            overlayDismissInFlight = false
+            updateRawSuppression()
         }
+        pendingOverlayDismissReset = reset
+        rootFrame.postDelayed(reset, 250L)
     }
 
     private fun isPointInsideView(view: View, rawX: Float, rawY: Float): Boolean {
