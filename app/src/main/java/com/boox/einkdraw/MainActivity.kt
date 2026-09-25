@@ -65,6 +65,7 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_ERASER_WIDTH = "eraser_width"
         private const val KEY_INK_COLOR = "ink_color"
         private const val KEY_PICKER_COLOR = "picker_color"
+        private const val KEY_VIEWPORT_LOCKED = "viewport_locked"
         private const val AUTOSAVE_FILE_NAME = "autosave.json"
     }
 
@@ -108,6 +109,7 @@ class MainActivity : AppCompatActivity() {
     private var layerDragDy: Float = 0f
     private var currentInkColor: Int = Color.BLACK
     private var pickerDotColor: Int = Color.BLUE
+    private var viewportLocked: Boolean = false
     private var currentDocumentBaseName: String = "drawing"
     private var manualEraserMode: Boolean = false
     private var lastBrushBeforeEraser: HardwarePenStyle? = null
@@ -199,6 +201,7 @@ class MainActivity : AppCompatActivity() {
         val saveFileBtn = findViewById<View>(R.id.buttonSaveFile)
         val shareBtn = findViewById<View>(R.id.buttonShare)
         val resetViewBtn = findViewById<View>(R.id.buttonResetView)
+        val lockViewportBtn = findViewById<TextView>(R.id.buttonLockViewport)
         val aboutBtn = findViewById<View>(R.id.buttonAbout)
 
         loadToolbarPrefs()
@@ -222,6 +225,7 @@ class MainActivity : AppCompatActivity() {
         guardRawMode(saveFileBtn)
         guardRawMode(shareBtn)
         guardRawMode(resetViewBtn)
+        guardRawMode(lockViewportBtn)
         guardRawMode(aboutBtn)
         guardRawMode(swatchBlack)
         guardRawMode(swatchWhite)
@@ -281,6 +285,13 @@ class MainActivity : AppCompatActivity() {
             resetViewport()
             updateRawSuppression()
         }
+        lockViewportBtn.setOnClickListener {
+            viewportLocked = !viewportLocked
+            penView.setViewportLocked(viewportLocked)
+            updateLockViewportLabel(lockViewportBtn)
+        }
+        penView.setViewportLocked(viewportLocked)
+        updateLockViewportLabel(lockViewportBtn)
         aboutBtn.setOnClickListener {
             fileMenuPanel.visibility = View.GONE
             showAboutDialog()
@@ -1159,6 +1170,12 @@ class MainActivity : AppCompatActivity() {
         eraserWidthPx = p.getFloat(KEY_ERASER_WIDTH, 30f)
         currentInkColor = p.getInt(KEY_INK_COLOR, Color.BLACK)
         pickerDotColor = p.getInt(KEY_PICKER_COLOR, Color.BLUE)
+        viewportLocked = p.getBoolean(KEY_VIEWPORT_LOCKED, false)
+    }
+
+    /** Reflect the current viewport-lock state in the menu item label. */
+    private fun updateLockViewportLabel(label: TextView) {
+        label.text = if (viewportLocked) "\u2713 Lock view" else "Lock view"
     }
 
     /** Persist the current toolbar settings. Called from onPause. */
@@ -1171,6 +1188,7 @@ class MainActivity : AppCompatActivity() {
             .putFloat(KEY_ERASER_WIDTH, eraserWidthPx)
             .putInt(KEY_INK_COLOR, currentInkColor)
             .putInt(KEY_PICKER_COLOR, pickerDotColor)
+            .putBoolean(KEY_VIEWPORT_LOCKED, viewportLocked)
             .apply()
     }
 

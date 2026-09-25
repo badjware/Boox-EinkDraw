@@ -173,6 +173,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
     )
     private var touchHelper: TouchHelper? = null
     private var viewportListener: ((Float) -> Unit)? = null
+    private var viewportLocked = false
     @Volatile
     private var viewportGestureSuppressRaw = false
     private var lastStylusButtonState = Int.MIN_VALUE
@@ -260,6 +261,15 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
     fun isEraseModeActive(): Boolean = manualEraserMode || stylusTipEraserMode
 
     fun getViewScale(): Float = viewScale
+
+    /** When locked, finger pan/pinch gestures are ignored so a stray touch cannot shift the view. */
+    fun setViewportLocked(locked: Boolean) {
+        viewportLocked = locked
+        if (locked && viewGestureMode != ViewGestureMode.NONE) {
+            viewGestureMode = ViewGestureMode.NONE
+            setViewportGestureRawSuppressed(false)
+        }
+    }
 
     fun resetViewport() {
         viewScale = 1f
@@ -598,7 +608,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
 
         // Finger-only stream is reserved for viewport gestures.
         if (!eventHasStylus(event)) {
-            handleViewportGesture(event)
+            if (!viewportLocked) handleViewportGesture(event)
             return true
         }
 
