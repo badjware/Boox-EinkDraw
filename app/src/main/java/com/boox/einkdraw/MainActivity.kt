@@ -46,6 +46,7 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.time.LocalDate
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
@@ -110,7 +111,7 @@ class MainActivity : AppCompatActivity() {
     private var currentInkColor: Int = Color.BLACK
     private var pickerDotColor: Int = Color.BLUE
     private var viewportLocked: Boolean = false
-    private var currentDocumentBaseName: String = "drawing"
+    private var currentDocumentBaseName: String = defaultDocumentBaseName()
     private var manualEraserMode: Boolean = false
     private var lastBrushBeforeEraser: HardwarePenStyle? = null
     private var lastColorBeforeEraser: Int? = null
@@ -259,7 +260,7 @@ class MainActivity : AppCompatActivity() {
         clearFileBtn.setOnClickListener {
             fileMenuPanel.visibility = View.GONE
             penView.clearFile()
-            currentDocumentBaseName = "drawing"
+            currentDocumentBaseName = defaultDocumentBaseName()
             refreshLayerPanel()
             updateRawSuppression()
         }
@@ -1134,8 +1135,11 @@ class MainActivity : AppCompatActivity() {
             ?.trim()
             ?.replace(Regex("""[\\/:*?"<>|]"""), "_")
             ?.ifBlank { null }
-        return cleaned ?: "drawing"
+        return cleaned ?: defaultDocumentBaseName()
     }
+
+    /** Default document base name: BooxDraw_ prefix plus the current ISO date (YYYY-MM-DD). */
+    private fun defaultDocumentBaseName(): String = "BooxDraw_${LocalDate.now()}"
 
     private fun buildOpenDocumentIntent(): Intent {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
