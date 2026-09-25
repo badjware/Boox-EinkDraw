@@ -11,7 +11,9 @@ import android.graphics.ImageDecoder
 import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -67,6 +69,8 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_INK_COLOR = "ink_color"
         private const val KEY_PICKER_COLOR = "picker_color"
         private const val KEY_VIEWPORT_LOCKED = "viewport_locked"
+        private const val KEY_COLOR_HISTORY = "color_history"
+        private const val MAX_COLOR_HISTORY = 6
         private const val AUTOSAVE_FILE_NAME = "autosave.json"
     }
 
@@ -83,6 +87,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var colorPickerPanel: View
     private lateinit var colorPickerView: CircularColorPickerView
     private lateinit var colorHexValue: TextView
+    private lateinit var grayscaleSeekBar: SeekBar
+    private var grayscaleThumb: GradientDrawable? = null
+    private lateinit var colorHistoryRow: LinearLayout
     private lateinit var layerPanel: View
     private lateinit var layerDragHandle: View
     private lateinit var layerRecycler: RecyclerView
@@ -102,6 +109,7 @@ class MainActivity : AppCompatActivity() {
     private var selectedBrushStyle: HardwarePenStyle = HardwarePenStyle.PENCIL
     private var selectedBrushBtn: ImageButton? = null
     private var selectedColorSwatch: View? = null
+    private val recentColors = ArrayDeque<Int>()
     private var pickerInFlight: Boolean = false
     private var activityPaused: Boolean = false
     private var uiTouchDepth: Int = 0
@@ -183,6 +191,8 @@ class MainActivity : AppCompatActivity() {
         colorPickerPanel = findViewById(R.id.colorPickerPanel)
         colorPickerView = findViewById(R.id.colorPickerView)
         colorHexValue = findViewById(R.id.textColorHex)
+        grayscaleSeekBar = findViewById(R.id.grayscaleSeekBar)
+        colorHistoryRow = findViewById(R.id.colorHistoryRow)
         layerPanel = findViewById(R.id.layerPanel)
         layerDragHandle = findViewById(R.id.layerDragHandle)
         layerRecycler = findViewById(R.id.layerRecycler)
@@ -209,6 +219,7 @@ class MainActivity : AppCompatActivity() {
         setupBrushButtons()
         setupWidthSeekBar()
         setupColorPickerPanel()
+        setupGrayscaleSlider()
         setupColorSwatches()
         setupLayerPanel()
         setupLayerPanelDrag()
@@ -218,6 +229,7 @@ class MainActivity : AppCompatActivity() {
         zoomValueLabel.setOnClickListener { resetViewport() }
 
         guardRawMode(widthSeekBar)
+        guardRawMode(grayscaleSeekBar)
         guardRawMode(zoomValueLabel)
         guardRawMode(loadBtn)
         guardRawMode(clearLayerBtn)
@@ -497,6 +509,7 @@ class MainActivity : AppCompatActivity() {
             colorHexValue.text = formatHex(pickerDotColor)
         }
         colorPickerPanel.visibility = if (willShow) View.VISIBLE else View.GONE
+        if (!willShow) onColorPickerPanelClosed()
         refreshPickerToggleSwatch(active = willShow)
         ensureOverlayOrder()
         if (!willShow) overlayDismissInFlight = true
@@ -646,12 +659,73 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    private fun setupGrayscaleSlider() {
+        val gradient = GradientDrawable(
+            GradientDrawable.Orientation.LEFT_RIGHT,
+            intArrayOf(Color.BLACK, Color.WHITE)
+        ).apply {
+            cornerRadius = dpF(7f)
+            setStroke(dp(1), Color.LTGRAY)
+            setSize(0, dp(14))
+        }
+        val track = LayerDrawable(arrayOf<Drawable>(gradient, ColorDrawable(Color.TRANSPARENT))).apply {
+            setId(0, android.R.id.background)
+            setId(1, android.R.id.progress)
+        }
+        grayscaleSeekBar.progressDrawable = track
+        val thumb = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(currentInkColor)
+            setStroke(dp(2), Color.WHITE)
+            setSize(dp(22), dp(22))
+        }
+        grayscaleThumb = thumb
+        grayscaleSeekBar.thumb = thumb
+        grayscaleSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                applyColor(Color.rgb(progress, progress, progress), swatch = null, syncPicker = true)
+            }
+
+            override fun onStartTrackingTouch(sb: SeekBar) = Unit
+            override fun onStopTrackingTouch(sb: SeekBar) = Unit
+        })
+    }
+
     private fun setupColorPickerPanel() {
         colorPickerView.onColorChanged = { color ->
             applyColor(color, swatch = null, syncPicker = false)
         }
         colorHexValue.text = formatHex(currentInkColor)
         colorPickerView.setColor(pickerDotColor)
+        refreshColorHistoryRow()
+    }
+
+    /** Record the last picker color into history when the picker panel closes. */
+    private fun onColorPickerPanelClosed() {
+        recentColors.removeAll { it == pickerDotColor }
+        recentColors.addFirst(pickerDotColor)
+        while (recentColors.size > MAX_COLOR_HISTORY) recentColors.removeLast()
+        refreshColorHistoryRow()
+    }
+
+    /** Rebuild the history swatch dots from the current recentColors list. */
+    private fun refreshColorHistoryRow() {
+        colorHistoryRow.removeAllViews()
+        val size = dp(28)
+        val margin = dp(3)
+        recentColors.forEach { color ->
+            val dot = View(this).apply {
+                layoutParams = LinearLayout.LayoutParams(size, size).apply {
+                    marginStart = margin
+                    marginEnd = margin
+                }
+                background = createSwatchDrawable(color, selected = false)
+                setOnClickListener { applyColor(color, swatch = null, syncPicker = true) }
+            }
+            guardRawMode(dot)
+            colorHistoryRow.addView(dot)
+        }
     }
 
     private fun setupColorSwatches() {
@@ -690,6 +764,11 @@ class MainActivity : AppCompatActivity() {
             pickerDotColor = currentInkColor
         }
         colorHexValue.text = formatHex(currentInkColor)
+        val luma = (0.299f * Color.red(currentInkColor) +
+            0.587f * Color.green(currentInkColor) +
+            0.114f * Color.blue(currentInkColor)).roundToInt().coerceIn(0, 255)
+        grayscaleSeekBar.progress = luma
+        grayscaleThumb?.setColor(Color.rgb(luma, luma, luma))
         refreshPickerToggleSwatch(active = colorPickerPanel.visibility == View.VISIBLE)
         if (syncPicker) {
             colorPickerView.setColor(currentInkColor)
@@ -1175,6 +1254,11 @@ class MainActivity : AppCompatActivity() {
         currentInkColor = p.getInt(KEY_INK_COLOR, Color.BLACK)
         pickerDotColor = p.getInt(KEY_PICKER_COLOR, Color.BLUE)
         viewportLocked = p.getBoolean(KEY_VIEWPORT_LOCKED, false)
+        recentColors.clear()
+        runCatching {
+            val history = JSONArray(p.getString(KEY_COLOR_HISTORY, "[]") ?: "[]")
+            for (i in 0 until history.length()) recentColors.addLast(history.getInt(i))
+        }
     }
 
     /** Reflect the current viewport-lock state in the menu item label. */
@@ -1186,6 +1270,8 @@ class MainActivity : AppCompatActivity() {
     private fun saveToolbarPrefs() {
         val widths = JSONObject()
         brushWidths.forEach { (style, width) -> widths.put(style.name, width.toDouble()) }
+        val history = JSONArray()
+        recentColors.forEach { history.put(it) }
         prefs().edit()
             .putString(KEY_BRUSH_STYLE, selectedBrushStyle.name)
             .putString(KEY_BRUSH_WIDTHS, widths.toString())
@@ -1193,6 +1279,7 @@ class MainActivity : AppCompatActivity() {
             .putInt(KEY_INK_COLOR, currentInkColor)
             .putInt(KEY_PICKER_COLOR, pickerDotColor)
             .putBoolean(KEY_VIEWPORT_LOCKED, viewportLocked)
+            .putString(KEY_COLOR_HISTORY, history.toString())
             .apply()
     }
 
@@ -1417,6 +1504,7 @@ class MainActivity : AppCompatActivity() {
             !isPointInsideView(swatchBlue, rawX, rawY)
         ) {
             colorPickerPanel.visibility = View.GONE
+            onColorPickerPanelClosed()
             dismissed = true
         }
 

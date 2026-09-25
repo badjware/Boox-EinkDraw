@@ -291,6 +291,20 @@
             android:layout_height="228dp"
             android:layout_gravity="center_horizontal" />
 
+        <SeekBar
+            android:id="@+id/grayscaleSeekBar"
+            android:layout_width="match_parent"
+            android:layout_height="36dp"
+            android:layout_marginTop="8dp"
+            android:max="255"
+            android:maxHeight="14dp"
+            android:minHeight="14dp"
+            android:splitTrack="false"
+            android:paddingStart="3dp"
+            android:paddingLeft="0dp"
+            android:paddingEnd="0dp"
+            android:paddingRight="0dp" />
+
         <TextView
             android:id="@+id/textColorHex"
             android:layout_width="match_parent"
@@ -301,6 +315,14 @@
             android:textColor="#F2F2F2"
             android:textSize="14sp"
             android:textStyle="bold" />
+
+        <LinearLayout
+            android:id="@+id/colorHistoryRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center"
+            android:orientation="horizontal" />
     </LinearLayout>
 
     <LinearLayout
