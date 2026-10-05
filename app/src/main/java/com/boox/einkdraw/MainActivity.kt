@@ -1555,12 +1555,14 @@ class MainActivity : AppCompatActivity() {
         saveToolbarPrefs()
         saveAutosaveCanvas()
         updateRawSuppression()
+        penView.setHostPaused(true)
     }
 
     override fun onResume() {
         super.onResume()
         activityPaused = false
         updateRawSuppression()
+        penView.setHostPaused(false)
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).roundToInt()

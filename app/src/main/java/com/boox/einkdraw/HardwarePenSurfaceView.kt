@@ -18,6 +18,7 @@ import android.view.View
 import com.onyx.android.sdk.api.device.epd.EpdController
 import com.onyx.android.sdk.api.device.epd.UpdateMode
 import com.onyx.android.sdk.data.note.TouchPoint
+import com.onyx.android.sdk.device.Device
 import com.onyx.android.sdk.pen.RawInputCallback
 import com.onyx.android.sdk.pen.TouchHelper
 import com.onyx.android.sdk.pen.data.TouchPointList
@@ -46,6 +47,9 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
     companion object {
         private const val TAG = "HardwarePenSurface"
         private const val RECONFIGURE_DEBOUNCE_MS = 32L
+
+        // The hardware preview draws erase strokes with this style, so committed erases use it too.
+        private val ERASER_STYLE = HardwarePenStyle.PENCIL
 
         // Undo/redo history budget. Bitmaps live on the Java heap (Android 8+), so history
         // competes with the ~36 MB-per-layer footprint and UI against the per-app heap cap
@@ -182,6 +186,11 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
     private var lastHoverButtonState = Int.MIN_VALUE
     private var lastHoveringState = false
 
+    // Firmware preview parameters as they were before this view changed them, keyed by hardware
+    // stroke style. The firmware state is global, so it is restored when the app is paused.
+    // Only touched on the helper thread.
+    private val savedPreviewParameters = HashMap<Int, FloatArray>()
+
     // Reused paint for layer-alpha composition
     private val layerPaint = Paint().apply { isFilterBitmap = true }
 
@@ -259,6 +268,21 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
     }
 
     fun isEraseModeActive(): Boolean = manualEraserMode || stylusTipEraserMode
+
+    /**
+     * Restore (paused) or re-apply (resumed) the firmware preview parameters this view sets.
+     * The firmware state is shared with every app, so it must not leak while the app is in the background.
+     *
+     * @param paused true when the host activity pauses, false when it resumes.
+     */
+    fun setHostPaused(paused: Boolean) {
+        if (paused) {
+            runOnHelperThread { restorePreviewStrokeParameters() }
+        } else {
+            val style = if (isEraseModeActive()) ERASER_STYLE else activeStyle
+            runOnHelperThread { applyPreviewStrokeParameters(style) }
+        }
+    }
 
     fun getViewScale(): Float = viewScale
 
@@ -634,6 +658,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
                 helper?.setRawDrawingEnabled(false)
                 helper?.closeRawDrawing()
             }
+            restorePreviewStrokeParameters()
         }
         helperThread.shutdown()
 
@@ -795,8 +820,9 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
                 // 4. Open (resets chip)
                 helper.openRawDrawing()
                 // 5. Style after open
-                val hardwareStyle = if (eraseMode) HardwarePenStyle.PENCIL else style
+                val hardwareStyle = if (eraseMode) ERASER_STYLE else style
                 helper.setStrokeStyle(hardwareStyle.hardwareStrokeStyle)
+                applyPreviewStrokeParameters(hardwareStyle)
                 // Re-apply params after style selection
                 helper.setStrokeWidth(widthPx)
                 helper.setStrokeColor(hardwareColor)
@@ -806,6 +832,29 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
                 helper.setRawDrawingEnabled(!(rawInputSuppressed || viewportGestureSuppressRaw))
             }
         }
+    }
+
+    /**
+     * Send [OnyxStrokeRenderer.previewStrokeParameters] for [style] to the firmware, saving the
+     * firmware's previous value first so it can be restored. Must run on the helper thread.
+     *
+     * @param style hardware preview style currently configured.
+     */
+    private fun applyPreviewStrokeParameters(style: HardwarePenStyle) {
+        val params = OnyxStrokeRenderer.previewStrokeParameters(style) ?: return
+        val id = style.hardwareStrokeStyle
+        runCatching {
+            val device = Device.currentDevice()
+            savedPreviewParameters.getOrPut(id) { device.getStrokeParameters(id) }
+            device.setStrokeParameters(id, params)
+        }
+    }
+
+    /** Put back the firmware preview parameters saved by [applyPreviewStrokeParameters]. Must run on the helper thread. */
+    private fun restorePreviewStrokeParameters() {
+        val device = Device.currentDevice()
+        savedPreviewParameters.forEach { (id, params) -> runCatching { device.setStrokeParameters(id, params) } }
+        savedPreviewParameters.clear()
     }
 
     // Rendering helpers
@@ -1687,7 +1736,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
             strokeInProgress = true
             strokePoints.clear()
             rawMovePoints.clear()
-            strokeStyle = activeStyle
+            strokeStyle = if (strokeIsErase) ERASER_STYLE else activeStyle
             strokeViewScale = viewScale
             strokeViewOffsetX = viewOffsetX
             strokeViewOffsetY = viewOffsetY
@@ -1774,6 +1823,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
             setStylusTipEraserMode(true, reconfigure = true)
             onBeginRawDrawing(success, pt)
             strokeIsErase = true
+            strokeStyle = ERASER_STYLE
         }
 
         override fun onEndRawErasing(success: Boolean, pt: TouchPoint?) {

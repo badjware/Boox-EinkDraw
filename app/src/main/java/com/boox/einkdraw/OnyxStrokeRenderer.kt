@@ -14,8 +14,9 @@ import android.graphics.RectF
 import com.onyx.android.sdk.data.note.TouchPoint
 import com.onyx.android.sdk.pen.NeoCharcoalPen
 import com.onyx.android.sdk.pen.NeoCharcoalPenV2
-import com.onyx.android.sdk.pen.NeoBrushPenWrapper
-import com.onyx.android.sdk.pen.NeoFountainPenWrapper
+import com.onyx.android.sdk.pen.NeoBrushPen
+import com.onyx.android.sdk.pen.NeoFountainPenV2
+import com.onyx.android.sdk.pen.NeoMarkerPen
 import com.onyx.android.sdk.pen.NeoMarkerPenWrapper
 import com.onyx.android.sdk.pen.NeoPen
 import com.onyx.android.sdk.pen.NeoPenConfig
@@ -37,17 +38,122 @@ import kotlin.math.sqrt
 /**
  * Software-canvas renderer that faithfully replicates each Onyx hardware stroke style.
  *
+ * Native styles run through libneo_pen with [penConfig], the config the firmware uses for the
+ * hardware preview, so committed strokes match what was previewed.
+ *
  * Strategy per style:
- *  PENCIL     – deterministic stipple dots scattered by position hash (grainy texture)
- *  FOUNTAIN   – NeoFountainPenWrapper (pressure-sensitive calligraphy outline)
- *  MARKER     – NeoMarkerPenWrapper on an off-screen layer composited at 50% alpha
- *  NEO_BRUSH  – NeoBrushPenWrapper (variable-width ink brush)
- *  CHARCOAL   – ring + dot cloud texture (V1 params)
+ *  PENCIL     – round-cap polyline
+ *  FOUNTAIN   – native Fountain V2 pen, drawn by point size
+ *  MARKER     – native marker pen on an off-screen layer composited at 50% alpha
+ *  NEO_BRUSH  – native brush pen, drawn by point size
+ *  CHARCOAL   – native charcoal texture stamps (fallback: ring + dot cloud texture)
  *  DASH       – DashPathEffect line
- *  CHARCOAL_V2– ring + dot cloud texture (V2 params, slightly larger halos)
- *  SQUARE_PEN – NeoSquarePen native path-result renderer (fallback: trig approximation)
+ *  CHARCOAL_V2– native charcoal V2 texture stamps (fallback: ring + dot cloud texture)
+ *  SQUARE_PEN – native square pen path results (fallback: trig approximation)
  */
 object OnyxStrokeRenderer {
+
+    /**
+     * libneo_pen config for [style], matching what the firmware uses for the hardware preview
+     * (logged by the system process under the neo_lib tag, "createPen ... pen config").
+     * Committed strokes must use the same config, or they render wider/thinner than the preview.
+     *
+     * @param style brush style.
+     * @param widthPx brush width in bitmap pixels.
+     * @return a fresh config, or null for styles not rendered by libneo_pen (pencil, dash).
+     */
+    fun penConfig(style: HardwarePenStyle, widthPx: Float): NeoPenConfig? {
+        val config = NeoPenConfig().setWidth(widthPx)
+        config.minWidth = 1f
+        config.pressureSensitivity = 0.375f
+        when (style) {
+            HardwarePenStyle.FOUNTAIN -> {
+                config.setWidth(widthPx + 3f)
+                config.pressureSensitivity = 0.3f
+                config.fastMode = true
+            }
+            HardwarePenStyle.MARKER, HardwarePenStyle.NEO_BRUSH -> Unit
+            HardwarePenStyle.CHARCOAL, HardwarePenStyle.CHARCOAL_V2 -> {
+                config.setTiltEnabled(true)
+                config.pressureSensitivity = 1f
+            }
+            HardwarePenStyle.SQUARE_PEN -> {
+                config.setWidth(widthPx * 2f)
+                config.minWidth = 0.001f
+                config.brushShape = NeoPenConfig.NEOPEN_BRUSH_SHAPE_RECTANGLE
+                config.brushRatio = 10f
+                // The firmware logs -45 but its y axis is flipped relative to the app canvas.
+                config.brushAngle = 45f
+            }
+            HardwarePenStyle.PENCIL, HardwarePenStyle.DASH -> return null
+        }
+        return config
+    }
+
+    /**
+     * Firmware stroke parameters (ViewUpdateHelper.setStrokeParameters) that make the hardware
+     * preview follow [penConfig]. Only the charcoal layout is known: [tiltEnabled, tiltScale].
+     *
+     * @param style brush style.
+     * @return parameters to send for the style's hardware stroke style, or null to leave the firmware default.
+     */
+    fun previewStrokeParameters(style: HardwarePenStyle): FloatArray? = when (style) {
+        HardwarePenStyle.CHARCOAL, HardwarePenStyle.CHARCOAL_V2 -> penConfig(style, 1f)?.let {
+            floatArrayOf(if (it.tiltEnabled) 1f else 0f, it.tiltScale)
+        }
+        else -> null
+    }
+
+    /**
+     * Native pen for [style] built from [config].
+     *
+     * @param style brush style; selects the libneo_pen pen type.
+     * @param config pen config, normally from [penConfig].
+     * @return the pen, or null for styles without a libneo_pen implementation.
+     */
+    private fun createPen(style: HardwarePenStyle, config: NeoPenConfig): NeoPen? = when (style) {
+        HardwarePenStyle.FOUNTAIN -> NeoFountainPenV2.Companion.create(config)
+        HardwarePenStyle.MARKER -> NeoMarkerPen.Companion.create(config)
+        HardwarePenStyle.NEO_BRUSH -> NeoBrushPen.Companion.create(config)
+        HardwarePenStyle.CHARCOAL -> NeoCharcoalPen.Companion.create(config)
+        HardwarePenStyle.CHARCOAL_V2 -> NeoCharcoalPenV2.Companion.create(config)
+        HardwarePenStyle.SQUARE_PEN -> NeoSquarePen.Companion.create(config)
+        HardwarePenStyle.PENCIL, HardwarePenStyle.DASH -> null
+    }
+
+    /**
+     * Run [points] through the native pen for a point-result style (fountain, marker, neo brush),
+     * mirroring NeoPenUtils.computeStrokePoints but with [penConfig].
+     *
+     * @param style brush style.
+     * @param points stroke points; copied, not modified.
+     * @param widthPx brush width in bitmap pixels.
+     * @param pressureDivisor value that normalizes point pressure to 0..1.
+     * @return sized points for PenUtils.drawStrokeByPointSize, or null if the native pen produced nothing.
+     */
+    private fun computeStrokePoints(
+        style: HardwarePenStyle,
+        points: List<TouchPoint>,
+        widthPx: Float,
+        pressureDivisor: Float,
+    ): List<TouchPoint>? {
+        if (points.size < 2) return null
+        val config = penConfig(style, widthPx) ?: return null
+        val pen = createPen(style, config) ?: return null
+        val pts = points.toArrayList()
+        val out = ArrayList<TouchPoint>(pts.size * 2)
+        return try {
+            for (p in pts) p.pressure /= pressureDivisor
+            invokePenDown(pen, pts.first())?.let { NeoPenUtils.readPointResult(it, out) }
+            if (pts.size > 2) {
+                invokePenMove(pen, pts.subList(1, pts.size - 1))?.let { NeoPenUtils.readPointResult(it, out) }
+            }
+            invokePenUp(pen, pts.last())?.let { NeoPenUtils.readPointResult(it, out) }
+            out.ifEmpty { null }
+        } finally {
+            runCatching { pen.destroy() }
+        }
+    }
 
     fun erase(
         style: HardwarePenStyle,
@@ -127,9 +233,8 @@ object OnyxStrokeRenderer {
             HardwarePenStyle.FOUNTAIN -> renderFountain(points, widthPx, color, canvas, maxPressure)
             HardwarePenStyle.MARKER -> renderMarker(points, widthPx, color, canvas, maxPressure)
             HardwarePenStyle.NEO_BRUSH -> renderNeoBrush(points, widthPx, color, canvas, maxPressure)
-            HardwarePenStyle.CHARCOAL -> renderCharcoal(points, widthPx, color, canvas, v2 = false, maxPressure = maxPressure)
+            HardwarePenStyle.CHARCOAL, HardwarePenStyle.CHARCOAL_V2 -> renderCharcoal(style, points, widthPx, color, canvas, maxPressure)
             HardwarePenStyle.DASH -> renderDash(points, widthPx, color, canvas)
-            HardwarePenStyle.CHARCOAL_V2 -> renderCharcoal(points, widthPx, color, canvas, v2 = true, maxPressure = maxPressure)
             HardwarePenStyle.SQUARE_PEN -> renderSquarePen(points, widthPx, color, canvas, maxPressure)
         }
     }
@@ -148,23 +253,21 @@ object OnyxStrokeRenderer {
         drawPolyline(points, canvas, paint)
     }
 
-    // ─── FOUNTAIN: NeoFountainPenWrapper ──────────────────────────────────────
+    // ─── FOUNTAIN: native Fountain V2 pen ─────────────────────────────────────
 
     private fun renderFountain(points: List<TouchPoint>, widthPx: Float, color: Int, canvas: Canvas, maxPressure: Float) {
         val paint = solidPaint(color)
         val pts = points.toArrayList()
         try {
             val pressureDivisor = nativePressureDivisor(pts, maxPressure)
-            // Signature: (points, displayScale, strokeWidth, maxTouchPressure)
-            // The wrapper divides each point.pressure by maxTouchPressure internally.
-            val result = NeoFountainPenWrapper.computeStrokePoints(pts, 1f, widthPx, pressureDivisor)
+            val result = computeStrokePoints(HardwarePenStyle.FOUNTAIN, pts, widthPx, pressureDivisor) ?: return
             com.onyx.android.sdk.pen.PenUtils.drawStrokeByPointSize(canvas, paint, result, false)
         } catch (_: Throwable) {
             fallbackPressureStroke(points, widthPx, color, canvas, HardwarePenStyle.FOUNTAIN, maxPressure)
         }
     }
 
-    // ─── MARKER: NeoMarkerPenWrapper, 50 % alpha offscreen composite ──────────
+    // ─── MARKER: native marker pen, 50 % alpha offscreen composite ──────────────
 
     private fun renderMarker(points: List<TouchPoint>, widthPx: Float, color: Int, canvas: Canvas, maxPressure: Float) {
         android.util.Log.d("MarkerTest", "renderMarker: ${points.size} pts width=$widthPx")
@@ -176,9 +279,8 @@ object OnyxStrokeRenderer {
             strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
         }
         try {
-            // Try the native wrapper — libneo_pen.so is now bundled in jniLibs/arm64-v8a
-            val result = NeoMarkerPenWrapper.computeStrokePoints(pts, widthPx, maxPressure)
-            android.util.Log.d("MarkerTest", "native OK: ${result?.size} result pts")
+            val result = computeStrokePoints(HardwarePenStyle.MARKER, pts, widthPx, nativePressureDivisor(pts, maxPressure)) ?: return
+            android.util.Log.d("MarkerTest", "native OK: ${result.size} result pts")
             NeoMarkerPenWrapper.drawStroke(canvas, paint, result, widthPx, false)
         } catch (e: Throwable) {
             // Native still fails for some reason — use pure-Kotlin replica
@@ -215,14 +317,14 @@ object OnyxStrokeRenderer {
         android.util.Log.d("MarkerTest", "fallback done")
     }
 
-    // ─── NEO_BRUSH: NeoBrushPenWrapper ───────────────────────────────────────
+    // ─── NEO_BRUSH: native brush pen ─────────────────────────────────────────
 
     private fun renderNeoBrush(points: List<TouchPoint>, widthPx: Float, color: Int, canvas: Canvas, maxPressure: Float) {
         val pts = points.toArrayList()
         val paint = solidPaint(color)
         try {
             val pressureDivisor = nativePressureDivisor(pts, maxPressure)
-            val result = NeoBrushPenWrapper.computeStrokePoints(pts, widthPx, pressureDivisor)
+            val result = computeStrokePoints(HardwarePenStyle.NEO_BRUSH, pts, widthPx, pressureDivisor)
             if (!result.isNullOrEmpty()) {
                 com.onyx.android.sdk.pen.PenUtils.drawStrokeByPointSize(canvas, paint, result, false)
             } else {
@@ -235,22 +337,22 @@ object OnyxStrokeRenderer {
 
     // ─── CHARCOAL / CHARCOAL_V2 ──────────────────────────────────────────────
     //
-    // Uses native wrappers:
-    //  - V1: NeoCharcoalPenWrapper.drawNormalStroke
-    //  - V2: NeoCharcoalPenV2Wrapper.drawNormalStroke
+    // Stamps native charcoal textures with [penConfig] (drawCharcoalWithHardwareLikeConfig).
+    // The SDK wrappers (NeoCharcoalPen[V2]Wrapper.drawNormalStroke) are the fallback.
     // A GC hint before each call encourages the JVM to collect Bitmap / PenResult
     // objects from the previous stroke before allocating new native stamps, preventing
     // heap exhaustion across many strokes.
     // Kotlin cloud-texture path is retained only as fallback.
 
     private fun renderCharcoal(
+        style: HardwarePenStyle,
         points: List<TouchPoint>,
         widthPx: Float,
         color: Int,
         canvas: Canvas,
-        v2: Boolean,
         maxPressure: Float,
     ) {
+        val v2 = style == HardwarePenStyle.CHARCOAL_V2
         if (points.size < 2) { charcoalCloudTexture(points, widthPx, color, canvas, v2); return }
 
         // Encourage GC to collect stamp objects from the previous stroke's render.
@@ -275,7 +377,7 @@ object OnyxStrokeRenderer {
             .setPenType(penType)
             .setScreenMatrix(android.graphics.Matrix())
             .setRenderMatrix(android.graphics.Matrix())
-            .setTiltEnabled(true)
+            .setTiltEnabled(penConfig(style, widthPx)?.tiltEnabled ?: true)
             .setErase(false)
             .setCreateArgs(createArgs)
 
@@ -287,15 +389,14 @@ object OnyxStrokeRenderer {
         )
 
         runCatching {
-            // Hardware preview path uses stronger pressure/min-width defaults than wrapper defaults.
-            // Match those config values first; fallback to SDK wrapper if the custom path fails.
+            // Fall back to the SDK wrapper if the custom path fails.
             val customDrawn = drawCharcoalWithHardwareLikeConfig(
                 points = prepared.first,
                 widthPx = widthPx,
                 color = color,
                 canvas = canvas,
                 maxPressure = pressureInfo.renderMaxPressure,
-                v2 = v2,
+                style = style,
             )
             if (!customDrawn) {
                 if (v2) {
@@ -313,8 +414,8 @@ object OnyxStrokeRenderer {
     }
 
     /**
-     * Replica of the charcoal wrapper call chain with explicit pen config tuning to match
-     * hardware-preview output (pressure response + minimum stamp width).
+     * Replica of the charcoal wrapper call chain, using [penConfig] so the committed stroke
+     * matches the hardware preview.
      */
     private fun drawCharcoalWithHardwareLikeConfig(
         points: List<TouchPoint>,
@@ -322,25 +423,13 @@ object OnyxStrokeRenderer {
         color: Int,
         canvas: Canvas,
         maxPressure: Float,
-        v2: Boolean,
+        style: HardwarePenStyle,
     ): Boolean {
         if (points.size < 2) return false
         val safeMaxPressure = max(1f, maxPressure)
         val screenMatrix = Matrix()
-        val penConfig = NeoPenConfig()
-            .setColor(color)
-            .setWidth(widthPx)
-            .setTiltEnabled(true)
-            .setRotateAngle(0)
-            .setMaxTouchPressure(safeMaxPressure)
-        penConfig.pressureSensitivity = 1.0f
-        penConfig.minWidth = 1.0f
-
-        val pen: NeoPen = if (v2) {
-            NeoCharcoalPenV2.Companion.create(penConfig)
-        } else {
-            NeoCharcoalPen.Companion.create(penConfig)
-        } ?: return false
+        val penConfig = penConfig(style, widthPx)?.setColor(color)?.setMaxTouchPressure(safeMaxPressure) ?: return false
+        val pen = createPen(style, penConfig) ?: return false
 
         val bitmaps = ArrayList<Bitmap>(512)
         return try {
@@ -621,11 +710,7 @@ object OnyxStrokeRenderer {
     // ─── SQUARE_PEN: NeoSquarePen (reference path from neo-reader) ──────────
 
     /**
-     * Matches neo-reader/knote software replay:
-     *  - NeoSquarePen default config
-     *  - width = strokeWidth * 2
-     *  - brushRatio = min(strokeWidth, 10)
-     *  - brushAngle = 45°
+     * NeoSquarePen with [penConfig]; falls back to a trig approximation if the native pen fails.
      */
     private fun renderSquarePen(
         points: List<TouchPoint>,
@@ -663,19 +748,8 @@ object OnyxStrokeRenderer {
             p.pressure = normalized.coerceIn(0.01f, 1f)
         }
 
-        val config = NeoSquarePen.Companion.defaultPenConfig()
-            .setColor(color)
-            .setWidth(widthPx * 2f)
-            .setRotateAngle(0)
-            .setMaxTouchPressure(1f)
-            .setTiltEnabled(true)
-        config.brushAngle = 45f
-        config.brushRatio = min(widthPx, 10f)
-        config.scalePrecision = 1f
-        config.displayScaleX = 1f
-        config.displayScaleY = 1f
-
-        val pen = NeoSquarePen.Companion.create(config) ?: return false
+        val config = penConfig(HardwarePenStyle.SQUARE_PEN, widthPx)?.setColor(color) ?: return false
+        val pen = createPen(HardwarePenStyle.SQUARE_PEN, config) ?: return false
         val results = ArrayList<Pair<PenResult?, PenResult?>>(4)
         return try {
             invokePenDown(pen, mapped.first())?.let(results::add)
