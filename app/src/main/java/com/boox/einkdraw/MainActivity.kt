@@ -118,7 +118,7 @@ class MainActivity : AppCompatActivity() {
     private var layerDragDy: Float = 0f
     private var currentInkColor: Int = Color.BLACK
     private var pickerDotColor: Int = Color.BLUE
-    private var viewportLocked: Boolean = false
+    private var viewportLocked: Boolean = true
     private var currentDocumentBaseName: String = defaultDocumentBaseName()
     private var manualEraserMode: Boolean = false
     private var lastBrushBeforeEraser: HardwarePenStyle? = null
@@ -505,8 +505,7 @@ class MainActivity : AppCompatActivity() {
         val willShow = colorPickerPanel.visibility != View.VISIBLE
         if (willShow) {
             layerPanel.visibility = View.GONE
-            colorPickerView.setColor(pickerDotColor)
-            colorHexValue.text = formatHex(pickerDotColor)
+            applyColor(pickerDotColor, swatch = null, syncPicker = true)
         }
         colorPickerPanel.visibility = if (willShow) View.VISIBLE else View.GONE
         if (!willShow) onColorPickerPanelClosed()
@@ -1253,7 +1252,7 @@ class MainActivity : AppCompatActivity() {
         eraserWidthPx = p.getFloat(KEY_ERASER_WIDTH, 30f)
         currentInkColor = p.getInt(KEY_INK_COLOR, Color.BLACK)
         pickerDotColor = p.getInt(KEY_PICKER_COLOR, Color.BLUE)
-        viewportLocked = p.getBoolean(KEY_VIEWPORT_LOCKED, false)
+        viewportLocked = p.getBoolean(KEY_VIEWPORT_LOCKED, true)
         recentColors.clear()
         runCatching {
             val history = JSONArray(p.getString(KEY_COLOR_HISTORY, "[]") ?: "[]")
