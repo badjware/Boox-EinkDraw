@@ -272,8 +272,6 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
     /**
      * Restore (paused) or re-apply (resumed) the firmware preview parameters this view sets.
      * The firmware state is shared with every app, so it must not leak while the app is in the background.
-     *
-     * @param paused true when the host activity pauses, false when it resumes.
      */
     fun setHostPaused(paused: Boolean) {
         if (paused) {
@@ -837,8 +835,6 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
     /**
      * Send [OnyxStrokeRenderer.previewStrokeParameters] for [style] to the firmware, saving the
      * firmware's previous value first so it can be restored. Must run on the helper thread.
-     *
-     * @param style hardware preview style currently configured.
      */
     private fun applyPreviewStrokeParameters(style: HardwarePenStyle) {
         val params = OnyxStrokeRenderer.previewStrokeParameters(style) ?: return
@@ -928,7 +924,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
      * can be undone/redone by restoring the region. Must run after render but before
      * updateSnapshot (the layer snapshot still holds the pre-stroke pixels here).
      */
-    private fun recordStrokeHistory(layer: LayerState, points: List<TouchPoint>, strokeWidthBitmapPx: Float, style: HardwarePenStyle) {
+    private fun recordStrokeHistory(layer: LayerState) {
         val rect = changedBounds(layer.snapshotBitmap, layer.bitmap) ?: return
         val before = Bitmap.createBitmap(layer.snapshotBitmap, rect.left, rect.top, rect.width(), rect.height())
         val after = Bitmap.createBitmap(layer.bitmap, rect.left, rect.top, rect.width(), rect.height())
@@ -1794,7 +1790,7 @@ class HardwarePenSurfaceView @JvmOverloads constructor(
                 }.onFailure { e ->
                     Log.e(TAG, "render threw: ${e.javaClass.simpleName}: ${e.message}", e)
                 }
-                recordStrokeHistory(layer, copy, strokeWidthPx, strokeStyle)
+                recordStrokeHistory(layer)
                 updateSnapshot(strokeLayerId)
                 setStrokeRefreshRect(copy, strokeWidthPx, strokeStyle)
             }
