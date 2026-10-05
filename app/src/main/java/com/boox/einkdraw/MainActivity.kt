@@ -3,6 +3,7 @@ package com.boox.einkdraw
 import android.app.Activity
 import android.app.Dialog
 import android.content.ClipData
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -48,7 +49,8 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
@@ -119,7 +121,8 @@ class MainActivity : AppCompatActivity() {
     private var currentInkColor: Int = Color.BLACK
     private var pickerDotColor: Int = Color.BLUE
     private var viewportLocked: Boolean = true
-    private var currentDocumentBaseName: String = defaultDocumentBaseName()
+    /** Null until the document is opened or saved; the timestamped default is then built at save time. */
+    private var currentDocumentBaseName: String? = null
     private var manualEraserMode: Boolean = false
     private var lastBrushBeforeEraser: HardwarePenStyle? = null
     private var lastColorBeforeEraser: Int? = null
@@ -141,7 +144,7 @@ class MainActivity : AppCompatActivity() {
     private val openMimeTypes = arrayOf("image/*", "application/json", "text/plain", "application/octet-stream")
 
     private val savePngLauncher = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("image/png")
+        CreateDocumentInDocuments("image/png")
     ) { uri ->
         uri?.let { savePng(it) }
         pickerInFlight = false
@@ -149,7 +152,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val saveDpaintLauncher = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("application/json")
+        CreateDocumentInDocuments("application/json")
     ) { uri ->
         uri?.let { saveDpaint(it) }
         pickerInFlight = false
@@ -272,7 +275,7 @@ class MainActivity : AppCompatActivity() {
         clearFileBtn.setOnClickListener {
             fileMenuPanel.visibility = View.GONE
             penView.clearFile()
-            currentDocumentBaseName = defaultDocumentBaseName()
+            currentDocumentBaseName = null
             refreshLayerPanel()
             updateRawSuppression()
         }
@@ -280,13 +283,13 @@ class MainActivity : AppCompatActivity() {
             fileMenuPanel.visibility = View.GONE
             pickerInFlight = true
             updateRawSuppression()
-            savePngLauncher.launch("${currentDocumentBaseName}.png")
+            savePngLauncher.launch("${currentDocumentBaseName ?: defaultDocumentBaseName()}.png")
         }
         saveFileBtn.setOnClickListener {
             fileMenuPanel.visibility = View.GONE
             pickerInFlight = true
             updateRawSuppression()
-            saveDpaintLauncher.launch("${currentDocumentBaseName}.json")
+            saveDpaintLauncher.launch("${currentDocumentBaseName ?: defaultDocumentBaseName()}.json")
         }
         shareBtn.setOnClickListener {
             fileMenuPanel.visibility = View.GONE
@@ -1216,8 +1219,9 @@ class MainActivity : AppCompatActivity() {
         return cleaned ?: defaultDocumentBaseName()
     }
 
-    /** Default document base name: BooxDraw_ prefix plus the current ISO date (YYYY-MM-DD). */
-    private fun defaultDocumentBaseName(): String = "BooxDraw_${LocalDate.now()}"
+    /** Default document base name: BooxDraw_ prefix plus the current date and time. */
+    private fun defaultDocumentBaseName(): String =
+        "BooxDraw_${LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss"))}"
 
     private fun buildOpenDocumentIntent(): Intent {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -1288,7 +1292,7 @@ class MainActivity : AppCompatActivity() {
     private fun saveAutosaveCanvas() {
         val snapshot = penView.snapshotDocumentForExport() ?: return
         runCatching {
-            val json = buildDpaintJson(snapshot, currentDocumentBaseName)
+            val json = buildDpaintJson(snapshot, currentDocumentBaseName ?: defaultDocumentBaseName())
             autosaveFile().writeText(json.toString(), Charsets.UTF_8)
         }
         snapshot.layers.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
@@ -1567,4 +1571,13 @@ class MainActivity : AppCompatActivity() {
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).roundToInt()
 
     private fun dpF(v: Float): Float = v * resources.displayMetrics.density
+}
+
+/** Save picker that opens in the shared Documents folder. */
+private class CreateDocumentInDocuments(mimeType: String) : ActivityResultContracts.CreateDocument(mimeType) {
+    override fun createIntent(context: Context, input: String): Intent =
+        super.createIntent(context, input).putExtra(
+            DocumentsContract.EXTRA_INITIAL_URI,
+            DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:Documents"),
+        )
 }
